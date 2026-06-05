@@ -84,26 +84,59 @@ const baseTest = base.extend<
   _coverageCollector: [
     async ({ page }, use, testInfo) => {
       await use();
-      if (process.env.E2E_COLLECT_COVERAGE !== "true") return;
-      try {
-        const coverage = await page.evaluate(
-          () =>
-            (
-              globalThis as unknown as {
-                // eslint-disable-next-line @typescript-eslint/naming-convention
-                __coverage__?: Record<string, unknown>;
-              }
-            ).__coverage__,
+      console.log("[_coverageCollector] Fixture executed");
+      console.log(
+        `[_coverageCollector] E2E_COLLECT_COVERAGE = ${process.env.E2E_COLLECT_COVERAGE}`,
+      );
+      if (process.env.E2E_COLLECT_COVERAGE !== "true") {
+        console.log(
+          "[_coverageCollector] Skipping - E2E_COLLECT_COVERAGE !== 'true'",
         );
-        if (!coverage) return;
+        return;
+      }
+      try {
+        // Wait a bit for any pending JS execution to complete
+        await page.waitForTimeout(1000);
+
+        console.log("[_coverageCollector] Evaluating page for __coverage__");
+
+        // Try to access __coverage__ from different scopes
+        const coverage = await page.evaluate(() => {
+          const globalObj = globalThis as unknown as {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            __coverage__?: Record<string, unknown>;
+          };
+
+          // Check window scope
+          const windowCov = globalObj.__coverage__;
+
+          // Also check if it's in a different context
+          console.log('[Browser] Checking window.__coverage__:', typeof windowCov);
+          console.log('[Browser] window keys containing coverage:',
+            Object.keys(globalObj).filter(k => k.includes('coverage')));
+
+          return windowCov;
+        });
+
+        console.log(
+          `[_coverageCollector] Coverage result: ${coverage ? `${Object.keys(coverage).length} files` : "undefined"}`,
+        );
+        if (!coverage) {
+          console.log("[_coverageCollector] No coverage data, returning");
+          return;
+        }
         const dir = path.join(testInfo.project.outputDir, "coverage");
         fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(
-          path.join(dir, `${testInfo.testId}-${Date.now()}.json`),
-          JSON.stringify(coverage),
+        const filePath = path.join(
+          dir,
+          `${testInfo.testId}-${Date.now()}.json`,
         );
-      } catch {
-        // Best-effort: page may have crashed or been closed
+        fs.writeFileSync(filePath, JSON.stringify(coverage));
+        console.log(
+          `[_coverageCollector] Written coverage to ${filePath} (${Object.keys(coverage).length} files)`,
+        );
+      } catch (error) {
+        console.error("[_coverageCollector] Error:", error);
       }
     },
     { auto: true, scope: "test" },
