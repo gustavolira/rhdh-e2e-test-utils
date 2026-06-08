@@ -83,6 +83,13 @@ const baseTest = base.extend<
   // eslint-disable-next-line @typescript-eslint/naming-convention
   _coverageCollector: [
     async ({ page }, use, testInfo) => {
+      // Forward browser console to test output
+      page.on('console', msg => {
+        const type = msg.type();
+        const text = msg.text();
+        console.log(`[Browser Console ${type.toUpperCase()}] ${text}`);
+      });
+
       await use();
       console.log("[_coverageCollector] Fixture executed");
       console.log(
@@ -100,23 +107,78 @@ const baseTest = base.extend<
 
         console.log("[_coverageCollector] Evaluating page for __coverage__");
 
-        // Try to access __coverage__ from different scopes
-        const coverage = await page.evaluate(() => {
-          const globalObj = globalThis as unknown as {
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            __coverage__?: Record<string, unknown>;
+        // Deep investigation of global scope
+        const coverageData = await page.evaluate(() => {
+          const globalObj = globalThis as any;
+
+          // Dump all keys containing "cov" to find coverage objects
+          const covKeys = Object.keys(globalObj).filter(k =>
+            k.toLowerCase().includes('cov') ||
+            k.includes('__') ||
+            k.includes('nyc') ||
+            k.includes('istanbul')
+          );
+
+          // Check common locations
+          const checks = {
+            'globalThis.__coverage__': globalObj.__coverage__,
+            'window.__coverage__': (globalObj.window as any)?.__coverage__,
+            'self.__coverage__': (globalObj.self as any)?.__coverage__,
+            'global.__coverage__': (globalObj.global as any)?.__coverage__,
           };
 
-          // Check window scope
-          const windowCov = globalObj.__coverage__;
+          // Also check all window frames
+          let frameCoverage = null;
+          try {
+            if (globalObj.frames && globalObj.frames.length > 0) {
+              for (let i = 0; i < globalObj.frames.length; i++) {
+                try {
+                  const frameCov = (globalObj.frames[i] as any).__coverage__;
+                  if (frameCov) {
+                    frameCoverage = frameCov;
+                    break;
+                  }
+                } catch (e) {
+                  // Frame might be cross-origin
+                }
+              }
+            }
+          } catch (e) {
+            // Ignore frame errors
+          }
 
-          // Also check if it's in a different context
-          console.log('[Browser] Checking window.__coverage__:', typeof windowCov);
-          console.log('[Browser] window keys containing coverage:',
-            Object.keys(globalObj).filter(k => k.includes('coverage')));
-
-          return windowCov;
+          return {
+            covKeys,
+            checks,
+            frameCoverage,
+            hasWindow: typeof globalObj.window !== 'undefined',
+            hasSelf: typeof globalObj.self !== 'undefined',
+            hasGlobal: typeof globalObj.global !== 'undefined',
+            totalKeys: Object.keys(globalObj).length,
+          };
         });
+
+        console.log("[_coverageCollector] Global scope investigation:");
+        console.log(`  - Total globalThis keys: ${coverageData.totalKeys}`);
+        console.log(`  - Keys containing 'cov': ${JSON.stringify(coverageData.covKeys)}`);
+        console.log(`  - hasWindow: ${coverageData.hasWindow}`);
+        console.log(`  - hasSelf: ${coverageData.hasSelf}`);
+        console.log(`  - hasGlobal: ${coverageData.hasGlobal}`);
+        console.log("  - Coverage location checks:");
+        for (const [key, value] of Object.entries(coverageData.checks)) {
+          console.log(`    ${key}: ${value ? `FOUND (${Object.keys(value as any).length} files)` : 'undefined'}`);
+        }
+        if (coverageData.frameCoverage) {
+          console.log(`  - Found coverage in iframe: ${Object.keys(coverageData.frameCoverage).length} files`);
+        }
+
+        // Try to extract the coverage object from any of the locations
+        const coverage =
+          coverageData.checks['globalThis.__coverage__'] ||
+          coverageData.checks['window.__coverage__'] ||
+          coverageData.checks['self.__coverage__'] ||
+          coverageData.checks['global.__coverage__'] ||
+          coverageData.frameCoverage;
 
         console.log(
           `[_coverageCollector] Coverage result: ${coverage ? `${Object.keys(coverage).length} files` : "undefined"}`,
